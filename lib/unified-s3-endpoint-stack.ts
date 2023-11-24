@@ -1,37 +1,40 @@
 import * as cdk from 'aws-cdk-lib';
-import { Construct } from 'constructs';
+import {Duration, Stack, StackProps} from 'aws-cdk-lib';
+import {Construct} from 'constructs';
 import * as globalaccelerator from 'aws-cdk-lib/aws-globalaccelerator';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import {
+  ApplicationProtocol,
+  ApplicationTargetGroup,
+  ListenerAction,
+  ListenerCondition,
+  TargetType
+} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import {Peer, Port, SecurityGroup} from 'aws-cdk-lib/aws-ec2';
 import * as ga_endpoints from 'aws-cdk-lib/aws-globalaccelerator-endpoints';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import {BasePathMapping, DomainName, EndpointType, SecurityPolicy} from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as s3 from "aws-cdk-lib/aws-s3";
-import { AwsCustomResource, AwsCustomResourcePolicy } from 'aws-cdk-lib/custom-resources';
+import {AwsCustomResource, AwsCustomResourcePolicy} from 'aws-cdk-lib/custom-resources';
 import * as iam from "aws-cdk-lib/aws-iam";
-import {
-  Stack, StackProps, Duration, CfnOutput, Tags,
-} from 'aws-cdk-lib';
-import { IpTarget } from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
-import {
-  ApplicationLoadBalancer, ApplicationProtocol, ApplicationTargetGroup, TargetType,
-  ListenerAction, ListenerCondition,
-} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import {Peer, Port, SecurityGroup, Vpc} from "aws-cdk-lib/aws-ec2";
-import path = require('path');
-import { options } from '../config';
+import {IpTarget} from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
+import {options} from '../config';
 import {Certificate} from "aws-cdk-lib/aws-certificatemanager";
 import {ARecord, HostedZone, RecordTarget} from "aws-cdk-lib/aws-route53";
-import {GlobalAcceleratorDomainTarget, GlobalAcceleratorTarget} from "aws-cdk-lib/aws-route53-targets";
-import {BasePathMapping, DomainName, EndpointType, SecurityPolicy} from "aws-cdk-lib/aws-apigateway";
+import {GlobalAcceleratorTarget} from "aws-cdk-lib/aws-route53-targets";
 import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
+import path = require('path');
 
 export class UnifiedS3EndpointStack extends cdk.Stack {
   vpc: ec2.Vpc;
 
   apiVpcEndpoint: ec2.VpcEndpoint;
 
-  endpointIpAddresses: string[];
+  apiVpcEndpointIpAddresses: string[];
+
+  s3VpcEndpointIpAddresses: string[];
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
     const vpc = new ec2.Vpc(this, 'Vpc', {
@@ -48,7 +51,7 @@ export class UnifiedS3EndpointStack extends cdk.Stack {
       ]
     });
 
-    const apiEndpoint = new ec2.InterfaceVpcEndpoint(this, 'VPC Endpoint', {
+    const apiVpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'Api VPC Endpoint', {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.execute-api`, 443),
       // Choose which availability zones to place the VPC endpoint in, based on
@@ -59,47 +62,74 @@ export class UnifiedS3EndpointStack extends cdk.Stack {
       }
     });
 
-    this.vpc = vpc;
-    this.apiVpcEndpoint = apiEndpoint;
+    const s3VpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'S3 VPC Endpoint', {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.s3`, 443),
+      // Choose which availability zones to place the VPC endpoint in, based on
+      // available AZs
+      subnets: {
+        subnets: vpc.isolatedSubnets,
+        // availabilityZones: ['ap-northeast-2a', 'ap-northeast-2c']
+      }
+    });
 
-    // use CDK custom resources to get the Network Interfaces and IP addresses of the API Endpoint
-    const vpcEndpointProps = new AwsCustomResource(this, 'vpcEndpointProps', {
-      onUpdate: {
-        service: 'EC2',
-        action: 'describeVpcEndpoints',
-        parameters: {
-          VpcEndpointIds: [apiEndpoint.vpcEndpointId],
+
+    this.vpc = vpc;
+    this.apiVpcEndpoint = apiVpcEndpoint;
+
+    function getNetworkInterfaceProps(scope:Construct, idSufix:string, vpcEndpointId:string): AwsCustomResource{
+      // use CDK custom resources to get the Network Interfaces and IP addresses of the API Endpoint
+      const vpcEndpointProps = new AwsCustomResource(scope, `vpcEndpointProps-${idSufix}`, {
+        onUpdate: {
+          service: 'EC2',
+          action: 'describeVpcEndpoints',
+          parameters: {
+            VpcEndpointIds: [vpcEndpointId],
+          },
+          physicalResourceId: {},
         },
-        physicalResourceId: {},
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
-      logRetention: 7,
-    });
-    const networkInterfaceProps = new AwsCustomResource(this, 'networkInterfaceProps', {
-      onUpdate: {
-        service: 'EC2',
-        action: 'describeNetworkInterfaces',
-        parameters: {
-          NetworkInterfaceIds: [
-            vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.0'),
-            vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.1'),
-          ],
+        policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
+        logRetention: 7,
+      });
+      return new AwsCustomResource(scope, `networkInterfaceProps-${idSufix}`, {
+        onUpdate: {
+          service: 'EC2',
+          action: 'describeNetworkInterfaces',
+          parameters: {
+            NetworkInterfaceIds: [
+              vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.0'),
+              vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.1'),
+            ],
+          },
+          physicalResourceId: {},
         },
-        physicalResourceId: {},
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
-      logRetention: 7,
-    });
-    this.endpointIpAddresses = [
+        policy: AwsCustomResourcePolicy.fromSdkCalls({resources: AwsCustomResourcePolicy.ANY_RESOURCE}),
+        logRetention: 7,
+      })
+
+    }
+
+    const networkInterfaceProps = getNetworkInterfaceProps(this, 'api', apiVpcEndpoint.vpcEndpointId);
+
+    this.apiVpcEndpointIpAddresses = [
       networkInterfaceProps.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
       networkInterfaceProps.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
     ];
+
+    const networkInterfaceProps2 = getNetworkInterfaceProps(this, 's3', s3VpcEndpoint.vpcEndpointId);
+
+    this.s3VpcEndpointIpAddresses = [
+      networkInterfaceProps2.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
+      networkInterfaceProps2.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
+    ];
+
   }
 }
 interface ApplicationStackProps extends StackProps {
   vpc: ec2.Vpc,
   apiVpcEndpoint: ec2.VpcEndpoint,
-  endpointIpAddresses: string[],
+  apiVpcEndpointIpAddresses: string[],
+  s3VpcEndpointIpAddresses: string[],
 }
 
 
@@ -120,7 +150,7 @@ export class ApplicationStack extends Stack {
     super(scope, id, props);
 
     const {
-      vpc, apiVpcEndpoint, endpointIpAddresses,
+      vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpointIpAddresses
     } = props;
 
     const {
@@ -195,7 +225,9 @@ export class ApplicationStack extends Stack {
 
 
 
-    const bucket = new s3.Bucket(this, "united.s3.bucket");
+    const bucket = new s3.Bucket(this, "united.s3.bucket",
+        {bucketName: apiDomainName}
+        );
 
     const handler = new NodejsFunction(this, "PreSignedURLHandler", {
       runtime: lambda.Runtime.NODEJS_18_X,
@@ -250,7 +282,7 @@ export class ApplicationStack extends Stack {
     });
 
     // add targets
-    const ipTargets = endpointIpAddresses.map((ip) => new IpTarget(ip));
+    const ipTargets = apiVpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
     const apiTargetGroup = new ApplicationTargetGroup(this, 'apiEndpointGroup', {
       targetGroupName: 'ApiEndpoints',
       port: 443,
@@ -266,6 +298,22 @@ export class ApplicationStack extends Stack {
     });
 
 
+    // add targets
+    const s3EndpointIpTargets = s3VpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
+    const s3EndpointTargetGroup = new ApplicationTargetGroup(this, 's3EndpointGroup', {
+      targetGroupName: 'S3Endpoints',
+      port: 443,
+      protocol: ApplicationProtocol.HTTPS,
+      healthCheck: {
+        path: '/',
+        interval: Duration.minutes(5),
+        healthyHttpCodes: '403',
+      },
+      targetType: TargetType.IP,
+      targets: s3EndpointIpTargets,
+      vpc,
+    });
+
     // listeners
     const https = alb.addListener('https', {
       port: 443,
@@ -274,12 +322,12 @@ export class ApplicationStack extends Stack {
     });
 
     // addRedirect will create a HTTP listener and redirect to HTTPS
-    // alb.addRedirect({
-    //   sourceProtocol: ApplicationProtocol.HTTP,
-    //   sourcePort: 80,
-    //   targetProtocol: ApplicationProtocol.HTTPS,
-    //   targetPort: 443,
-    // });
+    alb.addRedirect({
+      sourceProtocol: ApplicationProtocol.HTTP,
+      sourcePort: 80,
+      targetProtocol: ApplicationProtocol.HTTPS,
+      targetPort: 443,
+    });
 
     // add routing actions. Send a 404 response if the request does not match one of our API paths
     https.addAction('default', {
@@ -291,9 +339,16 @@ export class ApplicationStack extends Stack {
     https.addAction('apis', {
       action: ListenerAction.forward([apiTargetGroup]),
       conditions: [
-        ListenerCondition.pathPatterns([`/${apiPath1}`, `/${apiPath2}`]),
+        ListenerCondition.pathPatterns([`/${apiPath1}`]),
       ],
       priority: 1,
+    });
+    https.addAction('s3', {
+      action: ListenerAction.forward([s3EndpointTargetGroup]),
+      conditions: [
+        ListenerCondition.pathPatterns([`/${apiPath2}`]),
+      ],
+      priority: 2,
     });
   }
 }
