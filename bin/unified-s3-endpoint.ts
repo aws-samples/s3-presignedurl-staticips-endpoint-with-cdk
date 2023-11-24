@@ -10,8 +10,8 @@ const app = new cdk.App();
 // const account = process.env.CDK_DEFAULT_ACCOUNT;
 // const region = process.env.CDK_DEFAULT_REGION;
 
-const account = '535106968734';
-const region = 'ap-northeast-1';
+const account = '026543866495';
+const region = 'ap-northeast-2';
 
 if (!options.albHostname || !options.apiPath1 || !options.apiPath2 || options.apiPath1 === options.apiPath2) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
 
