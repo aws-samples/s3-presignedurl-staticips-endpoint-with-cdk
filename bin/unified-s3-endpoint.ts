@@ -13,7 +13,7 @@ const app = new cdk.App();
 const account = '026543866495';
 const region = 'ap-northeast-2';
 
-if (!options.albHostname || !options.apiPath1 || !options.apiPath2 || options.apiPath1 === options.apiPath2) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
+if (!options.apiPrefix || !options.apiPath1 || !options.apiPath2 || options.apiPath1 === options.apiPath2) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
 
 
 const vpcStack = new UnifiedS3EndpointStack(app, 'UnifiedS3EndpointStack', {
