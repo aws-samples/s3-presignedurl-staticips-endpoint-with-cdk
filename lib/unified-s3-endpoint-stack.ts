@@ -29,18 +29,28 @@ export class UnifiedS3EndpointStack extends cdk.Stack {
   endpointIpAddresses: string[];
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
-
     const vpc = new ec2.Vpc(this, 'Vpc', {
-      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16')
+      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
+      subnetConfiguration: [
+          {
+            name: 'public-subnet',
+            subnetType: ec2.SubnetType.PUBLIC
+          },
+        {
+          name: 'private-isolated-subnet',
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED
+        }
+      ]
     });
 
     const apiEndpoint = new ec2.InterfaceVpcEndpoint(this, 'VPC Endpoint', {
       vpc,
-      service: new ec2.InterfaceVpcEndpointService('com.amazonaws.ap-northeast-1.execute-api', 443),
+      service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.execute-api`, 443),
       // Choose which availability zones to place the VPC endpoint in, based on
       // available AZs
       subnets: {
-        availabilityZones: ['ap-northeast-1a', 'ap-northeast-1c']
+        subnets: vpc.isolatedSubnets,
+        // availabilityZones: ['ap-northeast-2a', 'ap-northeast-2c']
       }
     });
 
