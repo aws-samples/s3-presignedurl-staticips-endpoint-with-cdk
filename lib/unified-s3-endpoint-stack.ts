@@ -17,9 +17,14 @@ import {
   ApplicationLoadBalancer, ApplicationProtocol, ApplicationTargetGroup, TargetType,
   ListenerAction, ListenerCondition,
 } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import {Vpc} from "aws-cdk-lib/aws-ec2";
+import {Peer, Port, SecurityGroup, Vpc} from "aws-cdk-lib/aws-ec2";
 import path = require('path');
 import { options } from '../config';
+import {Certificate} from "aws-cdk-lib/aws-certificatemanager";
+import {ARecord, HostedZone, RecordTarget} from "aws-cdk-lib/aws-route53";
+import {GlobalAcceleratorDomainTarget, GlobalAcceleratorTarget} from "aws-cdk-lib/aws-route53-targets";
+import {BasePathMapping, DomainName, EndpointType, SecurityPolicy} from "aws-cdk-lib/aws-apigateway";
+import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
 
 export class UnifiedS3EndpointStack extends cdk.Stack {
   vpc: ec2.Vpc;
@@ -119,7 +124,7 @@ export class ApplicationStack extends Stack {
     } = props;
 
     const {
-      albHostname, apiPath1, apiPath2
+      certificateArn, dnsAttr, apiPrefix, apiPath1, apiPath2,
     } = options;
 
     // // VPC - from the VPC stack
@@ -127,12 +132,48 @@ export class ApplicationStack extends Stack {
 
     // Create the load balancer in a VPC. 'internetFacing' is 'false'
     // by default, which creates an internal load balancer.
-    const alb = new elbv2.ApplicationLoadBalancer(this, 'LB', {
-      vpc
+
+
+    const certificate = Certificate.fromCertificateArn(this, 'cert', certificateArn)
+
+
+    // DNS Zone
+    const zone = HostedZone.fromHostedZoneAttributes(this, 'zone', dnsAttr);
+    const { zoneName } = zone;
+
+    // host and domain for the API URL
+    const apiDomainName = `${apiPrefix}.${zoneName}`;
+
+    // security group
+    const albSg = new SecurityGroup(this, 'albSg', {
+      description: 'ALB Endpoint SG',
+      vpc,
+      allowAllOutbound: true,
     });
+
+    albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
+    albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal ALB access');
+
+    const alb = new elbv2.ApplicationLoadBalancer(this, 'LB', {
+      vpc,
+      internetFacing: false,
+      securityGroup: albSg,
+    });
+
+
+
 
     // Create an Accelerator
     const accelerator = new globalaccelerator.Accelerator(this, 'Accelerator');
+
+
+    // DNS alias for ALB
+    new ARecord(this, 'gaAlias', {
+      recordName: apiDomainName,
+      zone,
+      comment: 'Alias for GlobalAccelerator',
+      target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
+    });
 
     // Create a Listener
     const listener = accelerator.addListener('Listener', {
@@ -152,12 +193,14 @@ export class ApplicationStack extends Stack {
       ],
     });
 
+
+
     const bucket = new s3.Bucket(this, "united.s3.bucket");
 
-    const handler = new lambda.Function(this, "PreSignedURLHandler", {
+    const handler = new NodejsFunction(this, "PreSignedURLHandler", {
       runtime: lambda.Runtime.NODEJS_18_X,
-      code: lambda.Code.fromAsset("resources"),
-      handler: "presign.main",
+      entry: path.join(__dirname, "/../resources/presign.ts"),
+      handler: "handler",
       environment: {
         BUCKET: bucket.bucketName
       }
@@ -166,7 +209,7 @@ export class ApplicationStack extends Stack {
     bucket.grantReadWrite(handler);
 
 
-    new apigateway.LambdaRestApi(this, 'PrivateLambdaRestApi', {
+    const api = new apigateway.LambdaRestApi(this, 'PrivateLambdaRestApi', {
       endpointTypes: [apigateway.EndpointType.PRIVATE],
       handler: handler,
       policy: new iam.PolicyDocument({
@@ -192,6 +235,20 @@ export class ApplicationStack extends Stack {
       })
     })
 
+    // Create the API domain
+    const apiDomain = new DomainName(this, 'apiDomain', {
+      domainName: apiDomainName,
+      certificate,
+      endpointType: EndpointType.REGIONAL, // API domains can only be created for Regional endpoints, but it will work with the Private endpoint anyway
+      securityPolicy: SecurityPolicy.TLS_1_2,
+    });
+    // map API domain name to API
+    new BasePathMapping(this, 'pathMapping1', {
+      basePath: apiPath1,
+      domainName: apiDomain,
+      restApi: api,
+    });
+
     // add targets
     const ipTargets = endpointIpAddresses.map((ip) => new IpTarget(ip));
     const apiTargetGroup = new ApplicationTargetGroup(this, 'apiEndpointGroup', {
@@ -201,7 +258,7 @@ export class ApplicationStack extends Stack {
       healthCheck: {
         path: '/',
         interval: Duration.minutes(5),
-        healthyHttpCodes: '200-202,400-404',
+        healthyHttpCodes: '403',
       },
       targetType: TargetType.IP,
       targets: ipTargets,
@@ -210,15 +267,11 @@ export class ApplicationStack extends Stack {
 
 
     // listeners
-    const http = alb.addListener('http', {
-      port: 80,
-      protocol: ApplicationProtocol.HTTP,
+    const https = alb.addListener('https', {
+      port: 443,
+      protocol: ApplicationProtocol.HTTPS,
+      certificates: [certificate],
     });
-
-    // const https = alb.addListener('https', {
-    //   port: 443,
-    //   protocol: ApplicationProtocol.HTTPS,
-    // });
 
     // addRedirect will create a HTTP listener and redirect to HTTPS
     // alb.addRedirect({
@@ -229,13 +282,13 @@ export class ApplicationStack extends Stack {
     // });
 
     // add routing actions. Send a 404 response if the request does not match one of our API paths
-    http.addAction('default', {
+    https.addAction('default', {
       action: ListenerAction.fixedResponse(404, {
         contentType: 'text/plain',
         messageBody: 'Nothing to see here',
       }),
     });
-    http.addAction('apis', {
+    https.addAction('apis', {
       action: ListenerAction.forward([apiTargetGroup]),
       conditions: [
         ListenerCondition.pathPatterns([`/${apiPath1}`, `/${apiPath2}`]),
