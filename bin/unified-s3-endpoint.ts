@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import {ApplicationStack, UnifiedS3EndpointStack} from '../lib/unified-s3-endpoint-stack';
+import {UnifiedS3EndpointApplicationStack, UnifiedS3EndpointVpcStack} from '../lib/unified-s3-endpoint-stack';
 import { options } from '../config';
 const app = new cdk.App();
 
@@ -13,10 +13,10 @@ const app = new cdk.App();
 const account = '026543866495';
 const region = 'ap-northeast-2';
 
-if (!options.apiPrefix || !options.apiPath1 || !options.apiPath2 || options.apiPath1 === options.apiPath2) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
+if (!options.domainNamePrefix || !options.presignPath || !options.objectsPath || options.presignPath === options.objectsPath) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
 
 
-const vpcStack = new UnifiedS3EndpointStack(app, 'UnifiedS3EndpointStack', {
+const vpcStack = new UnifiedS3EndpointVpcStack(app, 'UnifiedS3EndpointVpcStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
    * Account/Region-dependent features and context lookups will not work,
    * but a single synthesized template can be deployed anywhere. */
@@ -38,7 +38,7 @@ const {
 } = vpcStack;
 
 // Create API and ALB resource stack
-new ApplicationStack(app, 'AlbApiDemoStack', {
+new UnifiedS3EndpointApplicationStack(app, 'UnifiedS3EndpointApplicationStack', {
   description: 'ALB API Demo Stack',
   env: { account, region },
   vpc,

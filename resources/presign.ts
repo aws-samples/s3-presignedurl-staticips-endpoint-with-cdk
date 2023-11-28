@@ -1,26 +1,32 @@
-import { S3Client, ListObjectsCommand } from "@aws-sdk/client-s3";
+import {S3RequestPresigner} from "@aws-sdk/s3-request-presigner";
+import { parseUrl } from "@smithy/url-parser";
+import { Hash } from "@smithy/hash-node";
+import { HttpRequest } from "@smithy/protocol-http";
+import { formatUrl } from "@aws-sdk/util-format-url";
+
+import {fromNodeProviderChain} from "@aws-sdk/credential-providers";
 
 // The following code uses the AWS SDK for JavaScript (v3).
 // For more information, see https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/index.html.
-const s3Client = new S3Client({});
 
-/**
- * @param {string} bucketName
- */
-const listObjectNames = async (bucketName) => {
-    const command = new ListObjectsCommand({ Bucket: bucketName });
-    const { Contents } = await s3Client.send(command);
 
-    if (!Contents.length) {
-        const err = new Error(`No objects found in ${bucketName}`);
-        err.name = "EmptyBucketError";
-        throw err;
-    }
 
-    // Map the response to a list of strings representing the keys of the Amazon Simple Storage Service (Amazon S3) objects.
-    // Filter out any objects that don't have keys.
-    return Contents.map(({ Key }) => Key).filter((k) => !!k);
-};
+const credentials = fromNodeProviderChain();
+const region = process.env.AWS_REGION || "ap-northeast-2";
+const preSigned = async (bucketName: string, key: string):Promise<string> => {
+
+    const s3ObjectUrl = parseUrl(`https://${bucketName}/${key}`);
+    const presigner = new S3RequestPresigner({
+        credentials,
+        region,
+        sha256: Hash.bind(null, "sha256"), // In Node.js
+        //sha256: Sha256 // In browsers
+    });
+// Create a GET request from S3 url.
+    const url = await presigner.presign(new HttpRequest(s3ObjectUrl));
+    return formatUrl(url);
+}
+
 
 /**
  * @typedef {{ httpMethod: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH', path: string }} LambdaEvent
@@ -30,9 +36,9 @@ const listObjectNames = async (bucketName) => {
  *
  * @param {LambdaEvent} lambdaEvent
  */
-const routeRequest = (lambdaEvent) => {
-    if (lambdaEvent.httpMethod === "GET" && lambdaEvent.path === "/") {
-        return handleGetRequest();
+const routeRequest = (lambdaEvent: { httpMethod?: string; path?: string }) => {
+    if (lambdaEvent.httpMethod === "GET") {
+        return handleGetRequest(lambdaEvent.path);
     }
 
     const error = new Error(
@@ -42,15 +48,21 @@ const routeRequest = (lambdaEvent) => {
     throw error;
 };
 
-const handleGetRequest = async () => {
+const handleGetRequest = async (path: string | undefined) => {
     if (process.env.BUCKET === "undefined") {
         const err = new Error(`No bucket name provided.`);
         err.name = "MissingBucketName";
         throw err;
     }
 
-    const objects = await listObjectNames(process.env.BUCKET);
-    return buildResponseBody(200, objects);
+
+    const key = path?.split('/').slice(2).join('/');
+
+    // @ts-ignore
+    const url = await preSigned(process.env.BUCKET, key);
+    return buildResponseBody(301, '', {
+        Location: url
+    });
 };
 
 /**
@@ -60,12 +72,12 @@ const handleGetRequest = async () => {
 /**
  *
  * @param {number} status
- * @param {Record<string, string>} headers
  * @param {Record<string, unknown>} body
  *
+ * @param {Record<string, string>} headers
  * @returns {LambdaResponse}
  */
-const buildResponseBody = (status, body, headers = {}) => {
+const buildResponseBody = (status: number, body: string, headers = {}) => {
     return {
         statusCode: status,
         headers,
@@ -77,24 +89,29 @@ const buildResponseBody = (status, body, headers = {}) => {
  *
  * @param {LambdaEvent} event
  */
-export const handler = async (event) => {
+export const handler = async (event: { httpMethod?: string; path?: string; }) => {
     try {
         return await routeRequest(event);
     } catch (err) {
         console.error(err);
 
+        // @ts-ignore
         if (err.name === "MissingBucketName") {
+            // @ts-ignore
             return buildResponseBody(400, err.message);
         }
 
+        // @ts-ignore
         if (err.name === "EmptyBucketError") {
-            return buildResponseBody(204, []);
+            return buildResponseBody(204, '');
         }
 
+        // @ts-ignore
         if (err.name === "UnimplementedHTTPMethodError") {
+            // @ts-ignore
             return buildResponseBody(400, err.message);
         }
-
+        // @ts-ignore
         return buildResponseBody(500, err.message || "Unknown server error");
     }
 };
