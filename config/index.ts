@@ -4,7 +4,7 @@ export const options = {
         zoneName: 'apg-scratchers.store',
         hostedZoneId: 'Z0407930KK7LS3XGG970',
     },
-    apiPrefix: 'api',
-    apiPath1: 'test-api1',
-    apiPath2: 'test-api2',
+    domainNamePrefix: 'unified-s3-endpoint',
+    presignPath: 'presign',
+    objectsPath: 'objects',
 };

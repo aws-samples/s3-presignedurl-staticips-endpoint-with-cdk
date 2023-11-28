@@ -27,7 +27,7 @@ import {GlobalAcceleratorTarget} from "aws-cdk-lib/aws-route53-targets";
 import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
 import path = require('path');
 
-export class UnifiedS3EndpointStack extends cdk.Stack {
+export class UnifiedS3EndpointVpcStack extends cdk.Stack {
   vpc: ec2.Vpc;
 
   apiVpcEndpoint: ec2.VpcEndpoint;
@@ -133,7 +133,7 @@ interface ApplicationStackProps extends StackProps {
 }
 
 
-export class ApplicationStack extends Stack {
+export class UnifiedS3EndpointApplicationStack extends Stack {
   /**
    * Deploys two simple API's with Lambda function and GET method.
    * API Url is output for use in testing.
@@ -154,7 +154,7 @@ export class ApplicationStack extends Stack {
     } = props;
 
     const {
-      certificateArn, dnsAttr, apiPrefix, apiPath1, apiPath2,
+      certificateArn, dnsAttr, domainNamePrefix, presignPath, objectsPath,
     } = options;
 
     // // VPC - from the VPC stack
@@ -172,7 +172,7 @@ export class ApplicationStack extends Stack {
     const { zoneName } = zone;
 
     // host and domain for the API URL
-    const apiDomainName = `${apiPrefix}.${zoneName}`;
+    const unifiedS3EndpointDomainName = `${domainNamePrefix}.${zoneName}`;
 
     // security group
     const albSg = new SecurityGroup(this, 'albSg', {
@@ -199,7 +199,7 @@ export class ApplicationStack extends Stack {
 
     // DNS alias for ALB
     new ARecord(this, 'gaAlias', {
-      recordName: apiDomainName,
+      recordName: unifiedS3EndpointDomainName,
       zone,
       comment: 'Alias for GlobalAccelerator',
       target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
@@ -226,7 +226,7 @@ export class ApplicationStack extends Stack {
 
 
     const bucket = new s3.Bucket(this, "united.s3.bucket",
-        {bucketName: apiDomainName}
+        {bucketName: unifiedS3EndpointDomainName}
         );
 
     const handler = new NodejsFunction(this, "PreSignedURLHandler", {
@@ -268,15 +268,15 @@ export class ApplicationStack extends Stack {
     })
 
     // Create the API domain
-    const apiDomain = new DomainName(this, 'apiDomain', {
-      domainName: apiDomainName,
+    const apiDomain = new DomainName(this, 'unifiedS3EndpointDomain', {
+      domainName: unifiedS3EndpointDomainName,
       certificate,
       endpointType: EndpointType.REGIONAL, // API domains can only be created for Regional endpoints, but it will work with the Private endpoint anyway
       securityPolicy: SecurityPolicy.TLS_1_2,
     });
     // map API domain name to API
-    new BasePathMapping(this, 'pathMapping1', {
-      basePath: apiPath1,
+    new BasePathMapping(this, 'pathMappingPresignAPI', {
+      basePath: presignPath,
       domainName: apiDomain,
       restApi: api,
     });
@@ -339,14 +339,14 @@ export class ApplicationStack extends Stack {
     https.addAction('apis', {
       action: ListenerAction.forward([apiTargetGroup]),
       conditions: [
-        ListenerCondition.pathPatterns([`/${apiPath1}`]),
+        ListenerCondition.pathPatterns([`/${presignPath}/*`]),
       ],
       priority: 1,
     });
     https.addAction('s3', {
       action: ListenerAction.forward([s3EndpointTargetGroup]),
       conditions: [
-        ListenerCondition.pathPatterns([`/${apiPath2}`]),
+        ListenerCondition.pathPatterns([`/${objectsPath}/*`]),
       ],
       priority: 2,
     });
