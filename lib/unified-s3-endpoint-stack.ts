@@ -195,17 +195,14 @@ export class ApplicationStack extends Stack {
 
     // Create an Accelerator
     const accelerator = new globalaccelerator.Accelerator(this, 'Accelerator');
-    const cfnAccelerator = accelerator.node.tryFindChild('Resource') as globalaccelerator.CfnAccelerator;
-    const acceleratorIPs = cfnAccelerator.attrIpv4Addresses;// the IPv4 addresses
-    
+
 
     // DNS alias for ALB
     new ARecord(this, 'gaAlias', {
       recordName: apiDomainName,
       zone,
-      comment: 'IPs for GlobalAccelerator',
-      // target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
-      target: RecordTarget.fromIpAddresses(...acceleratorIPs),
+      comment: 'Alias for GlobalAccelerator',
+      target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
     });
 
     // Create a Listener
