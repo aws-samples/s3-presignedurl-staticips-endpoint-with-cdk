@@ -20,7 +20,6 @@ const preSigned = async (bucketName: string, key: string):Promise<string> => {
         credentials,
         region,
         sha256: Hash.bind(null, "sha256"), // In Node.js
-        //sha256: Sha256 // In browsers
     });
 // Create a GET request from S3 url.
     const url = await presigner.presign(new HttpRequest(s3ObjectUrl));
