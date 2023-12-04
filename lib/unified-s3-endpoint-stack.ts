@@ -63,12 +63,27 @@ export class UnifiedS3EndpointVpcStack extends Stack {
             ]
         });
 
+        // security group
+        const vpceSg = new SecurityGroup(this, 'vpceSg', {
+            description: 'VPC Endpoint SG',
+            vpc,
+            allowAllOutbound: false
+        });
+
+        vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal access');
+        vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal access');
+        vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(443), 'allow access to service');
+        vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(80), 'allow access to service');
+
+
+
         const apiVpcEndpoint = new InterfaceVpcEndpoint(this, 'Api VPC Endpoint', {
             vpc,
             service: new InterfaceVpcEndpointService(`com.amazonaws.${this.region}.execute-api`, 443),
             subnets: {
                 subnets: vpc.isolatedSubnets,
-            }
+            },
+            securityGroups:[vpceSg]
         });
 
         const s3VpcEndpoint = new InterfaceVpcEndpoint(this, 'S3 VPC Endpoint', {
@@ -76,7 +91,8 @@ export class UnifiedS3EndpointVpcStack extends Stack {
             service: new InterfaceVpcEndpointService(`com.amazonaws.${this.region}.s3`, 443),
             subnets: {
                 subnets: vpc.isolatedSubnets,
-            }
+            },
+            securityGroups:[vpceSg]
         });
 
 
@@ -186,8 +202,7 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
         const albSg = new SecurityGroup(this, 'albSg', {
             description: 'ALB Endpoint SG',
             vpc,
-            allowAllOutbound: false,
-            disableInlineRules: true
+            allowAllOutbound: false
         });
 
         albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
