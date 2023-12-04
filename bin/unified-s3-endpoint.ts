@@ -31,7 +31,7 @@ const vpcStack = new UnifiedS3EndpointVpcStack(app, 'UnifiedS3EndpointVpcStack',
 
 
 const {
-  vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpointIpAddresses
+  vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses,s3VpcEndpoint, s3VpcEndpointIpAddresses
 } = vpcStack;
 
 // Create API and ALB resource stack
@@ -41,5 +41,6 @@ new UnifiedS3EndpointApplicationStack(app, 'UnifiedS3EndpointApplicationStack', 
   vpc,
   apiVpcEndpoint,
   apiVpcEndpointIpAddresses,
+  s3VpcEndpoint,
   s3VpcEndpointIpAddresses,
 });
