@@ -355,8 +355,8 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
         const s3EndpointIpTargets = s3VpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
         const s3EndpointTargetGroup = new ApplicationTargetGroup(this, 's3EndpointGroup', {
             targetGroupName: 'S3Endpoints',
-            port: 443,
-            protocol: ApplicationProtocol.HTTPS,
+            port: 80,
+            protocol: ApplicationProtocol.HTTP,
             healthCheck: {
                 protocol: Protocol.HTTP,
                 path: '/',
