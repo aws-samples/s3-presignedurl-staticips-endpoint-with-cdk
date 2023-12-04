@@ -17,6 +17,8 @@ import {
     ApplicationTargetGroup,
     ListenerAction,
     ListenerCondition,
+    Protocol,
+    SslPolicy,
     TargetType
 } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import {BasePathMapping, DomainName, EndpointType, LambdaRestApi, SecurityPolicy} from 'aws-cdk-lib/aws-apigateway';
@@ -30,14 +32,16 @@ import {ApplicationLoadBalancerEndpoint} from "aws-cdk-lib/aws-globalaccelerator
 import {Runtime} from "aws-cdk-lib/aws-lambda";
 import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
 import {AnyPrincipal, Effect, PolicyDocument, PolicyStatement} from "aws-cdk-lib/aws-iam";
-import {Bucket} from "aws-cdk-lib/aws-s3";
-import path = require('path');
+import {Bucket, BucketEncryption} from "aws-cdk-lib/aws-s3";
 import {options} from '../config';
+import path = require('path');
 
 export class UnifiedS3EndpointVpcStack extends Stack {
     vpc: Vpc;
 
     apiVpcEndpoint: VpcEndpoint;
+
+    s3VpcEndpoint: VpcEndpoint;
 
     apiVpcEndpointIpAddresses: string[];
 
@@ -78,6 +82,7 @@ export class UnifiedS3EndpointVpcStack extends Stack {
 
         this.vpc = vpc;
         this.apiVpcEndpoint = apiVpcEndpoint;
+        this.s3VpcEndpoint = s3VpcEndpoint;
 
         function getNetworkInterfaceProps(scope: Construct, idSufix: string, vpcEndpointId: string): AwsCustomResource {
             // use CDK custom resources to get the Network Interfaces and IP addresses of the VPC Endpoint
@@ -132,6 +137,7 @@ interface ApplicationStackProps extends StackProps {
     vpc: Vpc,
     apiVpcEndpoint: VpcEndpoint,
     apiVpcEndpointIpAddresses: string[],
+    s3VpcEndpoint: VpcEndpoint,
     s3VpcEndpointIpAddresses: string[],
 }
 
@@ -152,7 +158,7 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
         super(scope, id, props);
 
         const {
-            vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpointIpAddresses
+            vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpoint, s3VpcEndpointIpAddresses
         } = props;
 
         const {
@@ -180,18 +186,37 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
         const albSg = new SecurityGroup(this, 'albSg', {
             description: 'ALB Endpoint SG',
             vpc,
-            allowAllOutbound: true,
+            allowAllOutbound: false,
+            disableInlineRules: true
         });
 
         albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
         albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal ALB access');
+        albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow 80 egress')
+        albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow 443 egress')
+
+        const sgImmutable = SecurityGroup.fromSecurityGroupId(
+            this,
+            "LoadBalancerSecurityGroupImmutable",
+            albSg.securityGroupId,
+            { mutable: false }
+        );
 
         const alb = new ApplicationLoadBalancer(this, 'LB', {
             vpc,
             internetFacing: false,
-            securityGroup: albSg,
+            securityGroup: sgImmutable,
+            dropInvalidHeaderFields: true
         });
 
+
+        const logBucket = new Bucket(this, "logBucket",
+            {bucketName: `${unifiedS3EndpointDomainName}-logs`,
+                encryption: BucketEncryption.S3_MANAGED
+                    }
+
+        );
+        alb.logAccessLogs(logBucket, "albAccessLogs")
 
         // Create an Accelerator
         const accelerator = new Accelerator(this, 'Accelerator');
@@ -218,14 +243,19 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
                 new ApplicationLoadBalancerEndpoint(alb, {
                     weight: 128,
                     preserveClientIp: true,
+
                 }),
             ],
         });
 
 
         const bucket = new Bucket(this, "united.s3.bucket",
-            {bucketName: unifiedS3EndpointDomainName}
+            {bucketName: unifiedS3EndpointDomainName,
+                encryption: BucketEncryption.S3_MANAGED
+            }
         );
+
+
 
         const handler = new NodejsFunction(this, "PreSignedURLHandler", {
             runtime: Runtime.NODEJS_18_X,
@@ -238,6 +268,26 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
 
         bucket.grantReadWrite(handler);
 
+        bucket.addToResourcePolicy(
+            new PolicyStatement(
+                {
+                    principals: [new AnyPrincipal() ],
+                    resources: [
+                        bucket.arnForObjects("*"),
+                        bucket.bucketArn
+                    ],
+                    actions: ["s3:GetObject"],
+                    effect: Effect.DENY,
+                    conditions: {
+                        StringNotEquals: {
+                            "aws:SourceVpce": s3VpcEndpoint.vpcEndpointId
+                        }
+                    }
+
+
+                }
+            )
+        );
 
         const api = new LambdaRestApi(this, 'PrivateLambdaRestApi', {
             endpointTypes: [EndpointType.PRIVATE],
@@ -295,7 +345,6 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             vpc,
         });
 
-
         // add targets
         const s3EndpointIpTargets = s3VpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
         const s3EndpointTargetGroup = new ApplicationTargetGroup(this, 's3EndpointGroup', {
@@ -303,9 +352,10 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             port: 443,
             protocol: ApplicationProtocol.HTTPS,
             healthCheck: {
+                protocol: Protocol.HTTP,
                 path: '/',
                 interval: Duration.minutes(5),
-                healthyHttpCodes: '403',
+                healthyHttpCodes: '307,403,405',
             },
             targetType: TargetType.IP,
             targets: s3EndpointIpTargets,
@@ -317,15 +367,9 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             port: 443,
             protocol: ApplicationProtocol.HTTPS,
             certificates: [certificate],
+            sslPolicy:SslPolicy.TLS12_EXT
         });
 
-        // addRedirect will create a HTTP listener and redirect to HTTPS
-        alb.addRedirect({
-            sourceProtocol: ApplicationProtocol.HTTP,
-            sourcePort: 80,
-            targetProtocol: ApplicationProtocol.HTTPS,
-            targetPort: 443,
-        });
 
         // add routing actions. Send a 404 response if the request does not match one of our API paths
         https.addAction('default', {

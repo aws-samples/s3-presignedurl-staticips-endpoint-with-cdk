@@ -1,10 +1,10 @@
 export const options = {
-    certificateArn: 'arn:aws:acm:ap-northeast-2:026543866495:certificate/2fe4fb87-beeb-4df9-8337-a830bdfd6f4c',
+    certificateArn: 'arn:aws:acm:REPLACE-WITH-YOUR-ACM-ARN',
     dnsAttr: {
-        zoneName: 'apg-scratchers.store',
-        hostedZoneId: 'Z0407930KK7LS3XGG970',
+        zoneName: 'REPLACE-WITH-YOUR-ZONENAME(example.com)',
+        hostedZoneId: 'REPLACE-WITH-YOUR-HOSTEDZONEID',
     },
-    domainNamePrefix: 'unified-s3-endpoint',
+    domainNamePrefix: 's3-endpoint',
     presignPath: 'presign',
     objectsPath: 'objects',
 };
