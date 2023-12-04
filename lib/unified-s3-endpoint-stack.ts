@@ -1,354 +1,411 @@
-import * as cdk from 'aws-cdk-lib';
 import {Duration, Stack, StackProps} from 'aws-cdk-lib';
 import {Construct} from 'constructs';
-import * as globalaccelerator from 'aws-cdk-lib/aws-globalaccelerator';
-import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import {
-  ApplicationProtocol,
-  ApplicationTargetGroup,
-  ListenerAction,
-  ListenerCondition,
-  TargetType
+    InterfaceVpcEndpoint,
+    InterfaceVpcEndpointService,
+    IpAddresses,
+    Peer,
+    Port,
+    SecurityGroup,
+    SubnetType,
+    Vpc,
+    VpcEndpoint
+} from 'aws-cdk-lib/aws-ec2';
+import {
+    ApplicationLoadBalancer,
+    ApplicationProtocol,
+    ApplicationTargetGroup,
+    ListenerAction,
+    ListenerCondition,
+    Protocol,
+    SslPolicy,
+    TargetType
 } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import {Peer, Port, SecurityGroup} from 'aws-cdk-lib/aws-ec2';
-import * as ga_endpoints from 'aws-cdk-lib/aws-globalaccelerator-endpoints';
-import * as apigateway from 'aws-cdk-lib/aws-apigateway';
-import {BasePathMapping, DomainName, EndpointType, SecurityPolicy} from 'aws-cdk-lib/aws-apigateway';
-import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as s3 from "aws-cdk-lib/aws-s3";
+import {BasePathMapping, DomainName, EndpointType, LambdaRestApi, SecurityPolicy} from 'aws-cdk-lib/aws-apigateway';
 import {AwsCustomResource, AwsCustomResourcePolicy} from 'aws-cdk-lib/custom-resources';
-import * as iam from "aws-cdk-lib/aws-iam";
 import {IpTarget} from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
-import {options} from '../config';
 import {Certificate} from "aws-cdk-lib/aws-certificatemanager";
 import {ARecord, HostedZone, RecordTarget} from "aws-cdk-lib/aws-route53";
 import {GlobalAcceleratorTarget} from "aws-cdk-lib/aws-route53-targets";
+import {Accelerator} from "aws-cdk-lib/aws-globalaccelerator";
+import {ApplicationLoadBalancerEndpoint} from "aws-cdk-lib/aws-globalaccelerator-endpoints";
+import {Runtime} from "aws-cdk-lib/aws-lambda";
 import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
+import {AnyPrincipal, Effect, PolicyDocument, PolicyStatement} from "aws-cdk-lib/aws-iam";
+import {Bucket, BucketEncryption} from "aws-cdk-lib/aws-s3";
+import {options} from '../config';
 import path = require('path');
 
-export class UnifiedS3EndpointStack extends cdk.Stack {
-  vpc: ec2.Vpc;
+export class UnifiedS3EndpointVpcStack extends Stack {
+    vpc: Vpc;
 
-  apiVpcEndpoint: ec2.VpcEndpoint;
+    apiVpcEndpoint: VpcEndpoint;
 
-  apiVpcEndpointIpAddresses: string[];
+    s3VpcEndpoint: VpcEndpoint;
 
-  s3VpcEndpointIpAddresses: string[];
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
-    super(scope, id, props);
-    const vpc = new ec2.Vpc(this, 'Vpc', {
-      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
-      subnetConfiguration: [
-          {
-            name: 'public-subnet',
-            subnetType: ec2.SubnetType.PUBLIC
-          },
-        {
-          name: 'private-isolated-subnet',
-          subnetType: ec2.SubnetType.PRIVATE_ISOLATED
+    apiVpcEndpointIpAddresses: string[];
+
+    s3VpcEndpointIpAddresses: string[];
+
+    constructor(scope: Construct, id: string, props?: StackProps) {
+        super(scope, id, props);
+        const vpc = new Vpc(this, 'Vpc', {
+            ipAddresses: IpAddresses.cidr('10.0.0.0/16'),
+            subnetConfiguration: [
+                {
+                    name: 'public-subnet',
+                    subnetType: SubnetType.PUBLIC
+                },
+                {
+                    name: 'private-isolated-subnet',
+                    subnetType: SubnetType.PRIVATE_ISOLATED
+                }
+            ]
+        });
+
+        // security group
+        const vpceSg = new SecurityGroup(this, 'vpceSg', {
+            description: 'VPC Endpoint SG',
+            vpc,
+            allowAllOutbound: false
+        });
+
+        vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal access');
+        vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal access');
+        vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(443), 'allow access to service');
+        vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(80), 'allow access to service');
+
+
+
+        const apiVpcEndpoint = new InterfaceVpcEndpoint(this, 'Api VPC Endpoint', {
+            vpc,
+            service: new InterfaceVpcEndpointService(`com.amazonaws.${this.region}.execute-api`, 443),
+            subnets: {
+                subnets: vpc.isolatedSubnets,
+            },
+            securityGroups:[vpceSg]
+        });
+
+        const s3VpcEndpoint = new InterfaceVpcEndpoint(this, 'S3 VPC Endpoint', {
+            vpc,
+            service: new InterfaceVpcEndpointService(`com.amazonaws.${this.region}.s3`, 443),
+            subnets: {
+                subnets: vpc.isolatedSubnets,
+            },
+            securityGroups:[vpceSg]
+        });
+
+
+        this.vpc = vpc;
+        this.apiVpcEndpoint = apiVpcEndpoint;
+        this.s3VpcEndpoint = s3VpcEndpoint;
+
+        function getNetworkInterfaceProps(scope: Construct, idSufix: string, vpcEndpointId: string): AwsCustomResource {
+            // use CDK custom resources to get the Network Interfaces and IP addresses of the VPC Endpoint
+            const vpcEndpointProps = new AwsCustomResource(scope, `vpcEndpointProps-${idSufix}`, {
+                onUpdate: {
+                    service: 'EC2',
+                    action: 'describeVpcEndpoints',
+                    parameters: {
+                        VpcEndpointIds: [vpcEndpointId],
+                    },
+                    physicalResourceId: {},
+                },
+                policy: AwsCustomResourcePolicy.fromSdkCalls({resources: AwsCustomResourcePolicy.ANY_RESOURCE}),
+                logRetention: 7,
+            });
+            return new AwsCustomResource(scope, `networkInterfaceProps-${idSufix}`, {
+                onUpdate: {
+                    service: 'EC2',
+                    action: 'describeNetworkInterfaces',
+                    parameters: {
+                        NetworkInterfaceIds: [
+                            vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.0'),
+                            vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.1'),
+                        ],
+                    },
+                    physicalResourceId: {},
+                },
+                policy: AwsCustomResourcePolicy.fromSdkCalls({resources: AwsCustomResourcePolicy.ANY_RESOURCE}),
+                logRetention: 7,
+            })
+
         }
-      ]
-    });
 
-    const apiVpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'Api VPC Endpoint', {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.execute-api`, 443),
-      // Choose which availability zones to place the VPC endpoint in, based on
-      // available AZs
-      subnets: {
-        subnets: vpc.isolatedSubnets,
-        // availabilityZones: ['ap-northeast-2a', 'ap-northeast-2c']
-      }
-    });
+        const networkInterfaceProps = getNetworkInterfaceProps(this, 'api', apiVpcEndpoint.vpcEndpointId);
 
-    const s3VpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'S3 VPC Endpoint', {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.s3`, 443),
-      // Choose which availability zones to place the VPC endpoint in, based on
-      // available AZs
-      subnets: {
-        subnets: vpc.isolatedSubnets,
-        // availabilityZones: ['ap-northeast-2a', 'ap-northeast-2c']
-      }
-    });
+        this.apiVpcEndpointIpAddresses = [
+            networkInterfaceProps.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
+            networkInterfaceProps.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
+        ];
 
+        const networkInterfaceProps2 = getNetworkInterfaceProps(this, 's3', s3VpcEndpoint.vpcEndpointId);
 
-    this.vpc = vpc;
-    this.apiVpcEndpoint = apiVpcEndpoint;
-
-    function getNetworkInterfaceProps(scope:Construct, idSufix:string, vpcEndpointId:string): AwsCustomResource{
-      // use CDK custom resources to get the Network Interfaces and IP addresses of the API Endpoint
-      const vpcEndpointProps = new AwsCustomResource(scope, `vpcEndpointProps-${idSufix}`, {
-        onUpdate: {
-          service: 'EC2',
-          action: 'describeVpcEndpoints',
-          parameters: {
-            VpcEndpointIds: [vpcEndpointId],
-          },
-          physicalResourceId: {},
-        },
-        policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
-        logRetention: 7,
-      });
-      return new AwsCustomResource(scope, `networkInterfaceProps-${idSufix}`, {
-        onUpdate: {
-          service: 'EC2',
-          action: 'describeNetworkInterfaces',
-          parameters: {
-            NetworkInterfaceIds: [
-              vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.0'),
-              vpcEndpointProps.getResponseField('VpcEndpoints.0.NetworkInterfaceIds.1'),
-            ],
-          },
-          physicalResourceId: {},
-        },
-        policy: AwsCustomResourcePolicy.fromSdkCalls({resources: AwsCustomResourcePolicy.ANY_RESOURCE}),
-        logRetention: 7,
-      })
+        this.s3VpcEndpointIpAddresses = [
+            networkInterfaceProps2.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
+            networkInterfaceProps2.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
+        ];
 
     }
-
-    const networkInterfaceProps = getNetworkInterfaceProps(this, 'api', apiVpcEndpoint.vpcEndpointId);
-
-    this.apiVpcEndpointIpAddresses = [
-      networkInterfaceProps.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
-      networkInterfaceProps.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
-    ];
-
-    const networkInterfaceProps2 = getNetworkInterfaceProps(this, 's3', s3VpcEndpoint.vpcEndpointId);
-
-    this.s3VpcEndpointIpAddresses = [
-      networkInterfaceProps2.getResponseField('NetworkInterfaces.0.PrivateIpAddress'),
-      networkInterfaceProps2.getResponseField('NetworkInterfaces.1.PrivateIpAddress'),
-    ];
-
-  }
 }
+
 interface ApplicationStackProps extends StackProps {
-  vpc: ec2.Vpc,
-  apiVpcEndpoint: ec2.VpcEndpoint,
-  apiVpcEndpointIpAddresses: string[],
-  s3VpcEndpointIpAddresses: string[],
+    vpc: Vpc,
+    apiVpcEndpoint: VpcEndpoint,
+    apiVpcEndpointIpAddresses: string[],
+    s3VpcEndpoint: VpcEndpoint,
+    s3VpcEndpointIpAddresses: string[],
 }
 
 
-export class ApplicationStack extends Stack {
-  /**
-   * Deploys two simple API's with Lambda function and GET method.
-   * API Url is output for use in testing.
-   *
-   * The ALB sits in front of the API's and includes a custom hostname
-   * configured in Route53.
-   *
-   * @param {Construct} scope
-   * @param {string} id
-   * @param {StackProps=} props
-   *
-   */
-  constructor(scope: Construct, id: string, props: ApplicationStackProps) {
-    super(scope, id, props);
+export class UnifiedS3EndpointApplicationStack extends Stack {
+    /**
+     * Deploys API with Lambda function and GET method for presigned url generation.
+     *
+     * The GA and ALB sits in front of the ALB and includes a custom hostname
+     * configured in Route53.
+     *
+     * @param {Construct} scope
+     * @param {string} id
+     * @param {StackProps=} props
+     *
+     */
+    constructor(scope: Construct, id: string, props: ApplicationStackProps) {
+        super(scope, id, props);
 
-    const {
-      vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpointIpAddresses
-    } = props;
+        const {
+            vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpoint, s3VpcEndpointIpAddresses
+        } = props;
 
-    const {
-      certificateArn, dnsAttr, apiPrefix, apiPath1, apiPath2,
-    } = options;
+        const {
+            certificateArn, dnsAttr, domainNamePrefix, presignPath, objectsPath,
+        } = options;
 
-    // // VPC - from the VPC stack
-    // const vpc = Vpc.fromLookup(this, 'vpc', { vpcId });
+        // VPC - from the VPC stack
+        // const vpc = Vpc.fromLookup(this, 'vpc', { vpcId });
 
-    // Create the load balancer in a VPC. 'internetFacing' is 'false'
-    // by default, which creates an internal load balancer.
-
-
-    const certificate = Certificate.fromCertificateArn(this, 'cert', certificateArn)
+        // Create the load balancer in a VPC. 'internetFacing' is 'false'
+        // by default, which creates an internal load balancer.
 
 
-    // DNS Zone
-    const zone = HostedZone.fromHostedZoneAttributes(this, 'zone', dnsAttr);
-    const { zoneName } = zone;
-
-    // host and domain for the API URL
-    const apiDomainName = `${apiPrefix}.${zoneName}`;
-
-    // security group
-    const albSg = new SecurityGroup(this, 'albSg', {
-      description: 'ALB Endpoint SG',
-      vpc,
-      allowAllOutbound: true,
-    });
-
-    albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
-    albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal ALB access');
-
-    const alb = new elbv2.ApplicationLoadBalancer(this, 'LB', {
-      vpc,
-      internetFacing: false,
-      securityGroup: albSg,
-    });
+        const certificate = Certificate.fromCertificateArn(this, 'cert', certificateArn)
 
 
+        // DNS Zone
+        const zone = HostedZone.fromHostedZoneAttributes(this, 'zone', dnsAttr);
+        const {zoneName} = zone;
 
+        // host and domain for the API URL
+        const unifiedS3EndpointDomainName = `${domainNamePrefix}.${zoneName}`;
 
-    // Create an Accelerator
-    const accelerator = new globalaccelerator.Accelerator(this, 'Accelerator');
+        // security group
+        const albSg = new SecurityGroup(this, 'albSg', {
+            description: 'ALB Endpoint SG',
+            vpc,
+            allowAllOutbound: false
+        });
 
+        albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
+        albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal ALB access');
+        albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow 80 egress')
+        albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow 443 egress')
 
-    // DNS alias for ALB
-    new ARecord(this, 'gaAlias', {
-      recordName: apiDomainName,
-      zone,
-      comment: 'Alias for GlobalAccelerator',
-      target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
-    });
-
-    // Create a Listener
-    const listener = accelerator.addListener('Listener', {
-      portRanges: [
-        { fromPort: 80 },
-        { fromPort: 443 },
-      ],
-    });
-
-    // Add one EndpointGroup for each Region we are targeting
-    listener.addEndpointGroup('Group', {
-      endpoints: [
-        new ga_endpoints.ApplicationLoadBalancerEndpoint(alb, {
-          weight: 128,
-          preserveClientIp: true,
-        }),
-      ],
-    });
-
-
-
-    const bucket = new s3.Bucket(this, "united.s3.bucket",
-        {bucketName: apiDomainName}
+        const sgImmutable = SecurityGroup.fromSecurityGroupId(
+            this,
+            "LoadBalancerSecurityGroupImmutable",
+            albSg.securityGroupId,
+            { mutable: false }
         );
 
-    const handler = new NodejsFunction(this, "PreSignedURLHandler", {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      entry: path.join(__dirname, "/../resources/presign.ts"),
-      handler: "handler",
-      environment: {
-        BUCKET: bucket.bucketName
-      }
-    });
-
-    bucket.grantReadWrite(handler);
+        const alb = new ApplicationLoadBalancer(this, 'LB', {
+            vpc,
+            internetFacing: false,
+            securityGroup: sgImmutable,
+            dropInvalidHeaderFields: true
+        });
 
 
-    const api = new apigateway.LambdaRestApi(this, 'PrivateLambdaRestApi', {
-      endpointTypes: [apigateway.EndpointType.PRIVATE],
-      handler: handler,
-      policy: new iam.PolicyDocument({
-        statements: [
-          new iam.PolicyStatement({
-            principals: [new iam.AnyPrincipal],
-            actions: ['execute-api:Invoke'],
-            resources: ['execute-api:/*'],
-            effect: iam.Effect.DENY,
-            conditions: {
-              StringNotEquals: {
-                "aws:SourceVpce": apiVpcEndpoint.vpcEndpointId
-              }
+        const logBucket = new Bucket(this, "logBucket",
+            {bucketName: `${unifiedS3EndpointDomainName}-logs`,
+                encryption: BucketEncryption.S3_MANAGED
+                    }
+
+        );
+        alb.logAccessLogs(logBucket, "albAccessLogs")
+
+        // Create an Accelerator
+        const accelerator = new Accelerator(this, 'Accelerator');
+
+        // DNS alias for ALB
+        new ARecord(this, 'gaAlias', {
+            recordName: unifiedS3EndpointDomainName,
+            zone,
+            comment: 'Alias for GlobalAccelerator',
+            target: RecordTarget.fromAlias(new GlobalAcceleratorTarget(accelerator)),
+        });
+
+        // Create a Listener
+        const listener = accelerator.addListener('Listener', {
+            portRanges: [
+                {fromPort: 80},
+                {fromPort: 443},
+            ],
+        });
+
+        // Add one EndpointGroup for each Region we are targeting
+        listener.addEndpointGroup('Group', {
+            endpoints: [
+                new ApplicationLoadBalancerEndpoint(alb, {
+                    weight: 128,
+                    preserveClientIp: true,
+
+                }),
+            ],
+        });
+
+
+        const bucket = new Bucket(this, "united.s3.bucket",
+            {bucketName: unifiedS3EndpointDomainName,
+                encryption: BucketEncryption.S3_MANAGED
             }
-          }),
-          new iam.PolicyStatement({
-            principals: [new iam.AnyPrincipal],
-            actions: ['execute-api:Invoke'],
-            resources: ['execute-api:/*'],
-            effect: iam.Effect.ALLOW
-          })
-        ]
-      })
-    })
-
-    // Create the API domain
-    const apiDomain = new DomainName(this, 'apiDomain', {
-      domainName: apiDomainName,
-      certificate,
-      endpointType: EndpointType.REGIONAL, // API domains can only be created for Regional endpoints, but it will work with the Private endpoint anyway
-      securityPolicy: SecurityPolicy.TLS_1_2,
-    });
-    // map API domain name to API
-    new BasePathMapping(this, 'pathMapping1', {
-      basePath: apiPath1,
-      domainName: apiDomain,
-      restApi: api,
-    });
-
-    // add targets
-    const ipTargets = apiVpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
-    const apiTargetGroup = new ApplicationTargetGroup(this, 'apiEndpointGroup', {
-      targetGroupName: 'ApiEndpoints',
-      port: 443,
-      protocol: ApplicationProtocol.HTTPS,
-      healthCheck: {
-        path: '/',
-        interval: Duration.minutes(5),
-        healthyHttpCodes: '403',
-      },
-      targetType: TargetType.IP,
-      targets: ipTargets,
-      vpc,
-    });
+        );
 
 
-    // add targets
-    const s3EndpointIpTargets = s3VpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
-    const s3EndpointTargetGroup = new ApplicationTargetGroup(this, 's3EndpointGroup', {
-      targetGroupName: 'S3Endpoints',
-      port: 443,
-      protocol: ApplicationProtocol.HTTPS,
-      healthCheck: {
-        path: '/',
-        interval: Duration.minutes(5),
-        healthyHttpCodes: '403',
-      },
-      targetType: TargetType.IP,
-      targets: s3EndpointIpTargets,
-      vpc,
-    });
 
-    // listeners
-    const https = alb.addListener('https', {
-      port: 443,
-      protocol: ApplicationProtocol.HTTPS,
-      certificates: [certificate],
-    });
+        const handler = new NodejsFunction(this, "PreSignedURLHandler", {
+            runtime: Runtime.NODEJS_18_X,
+            entry: path.join(__dirname, "/../resources/presign.ts"),
+            handler: "handler",
+            environment: {
+                BUCKET: bucket.bucketName
+            }
+        });
 
-    // addRedirect will create a HTTP listener and redirect to HTTPS
-    alb.addRedirect({
-      sourceProtocol: ApplicationProtocol.HTTP,
-      sourcePort: 80,
-      targetProtocol: ApplicationProtocol.HTTPS,
-      targetPort: 443,
-    });
+        bucket.grantReadWrite(handler);
 
-    // add routing actions. Send a 404 response if the request does not match one of our API paths
-    https.addAction('default', {
-      action: ListenerAction.fixedResponse(404, {
-        contentType: 'text/plain',
-        messageBody: 'Nothing to see here',
-      }),
-    });
-    https.addAction('apis', {
-      action: ListenerAction.forward([apiTargetGroup]),
-      conditions: [
-        ListenerCondition.pathPatterns([`/${apiPath1}`]),
-      ],
-      priority: 1,
-    });
-    https.addAction('s3', {
-      action: ListenerAction.forward([s3EndpointTargetGroup]),
-      conditions: [
-        ListenerCondition.pathPatterns([`/${apiPath2}`]),
-      ],
-      priority: 2,
-    });
-  }
+        bucket.addToResourcePolicy(
+            new PolicyStatement(
+                {
+                    principals: [new AnyPrincipal() ],
+                    resources: [
+                        bucket.arnForObjects("*"),
+                        bucket.bucketArn
+                    ],
+                    actions: ["s3:GetObject"],
+                    effect: Effect.DENY,
+                    conditions: {
+                        StringNotEquals: {
+                            "aws:SourceVpce": s3VpcEndpoint.vpcEndpointId
+                        }
+                    }
+
+
+                }
+            )
+        );
+
+        const api = new LambdaRestApi(this, 'PrivateLambdaRestApi', {
+            endpointTypes: [EndpointType.PRIVATE],
+            handler: handler,
+            policy: new PolicyDocument({
+                statements: [
+                    new PolicyStatement({
+                        principals: [new AnyPrincipal],
+                        actions: ['execute-api:Invoke'],
+                        resources: ['execute-api:/*'],
+                        effect: Effect.DENY,
+                        conditions: {
+                            StringNotEquals: {
+                                "aws:SourceVpce": apiVpcEndpoint.vpcEndpointId
+                            }
+                        }
+                    }),
+                    new PolicyStatement({
+                        principals: [new AnyPrincipal],
+                        actions: ['execute-api:Invoke'],
+                        resources: ['execute-api:/*'],
+                        effect: Effect.ALLOW
+                    })
+                ]
+            })
+        })
+
+        // Create the API domain
+        const apiDomain = new DomainName(this, 'unifiedS3EndpointDomain', {
+            domainName: unifiedS3EndpointDomainName,
+            certificate,
+            endpointType: EndpointType.REGIONAL, // API domains can only be created for Regional endpoints, but it will work with the Private endpoint anyway
+            securityPolicy: SecurityPolicy.TLS_1_2,
+        });
+        // map API domain name to API
+        new BasePathMapping(this, 'pathMappingPresignAPI', {
+            basePath: presignPath,
+            domainName: apiDomain,
+            restApi: api,
+        });
+
+        // add targets
+        const ipTargets = apiVpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
+        const apiTargetGroup = new ApplicationTargetGroup(this, 'apiEndpointGroup', {
+            targetGroupName: 'ApiEndpoints',
+            port: 443,
+            protocol: ApplicationProtocol.HTTPS,
+            healthCheck: {
+                path: '/',
+                interval: Duration.minutes(5),
+                healthyHttpCodes: '403',
+            },
+            targetType: TargetType.IP,
+            targets: ipTargets,
+            vpc,
+        });
+
+        // add targets
+        const s3EndpointIpTargets = s3VpcEndpointIpAddresses.map((ip) => new IpTarget(ip));
+        const s3EndpointTargetGroup = new ApplicationTargetGroup(this, 's3EndpointGroup', {
+            targetGroupName: 'S3Endpoints',
+            port: 443,
+            protocol: ApplicationProtocol.HTTPS,
+            healthCheck: {
+                protocol: Protocol.HTTP,
+                path: '/',
+                interval: Duration.minutes(5),
+                healthyHttpCodes: '307,403,405',
+            },
+            targetType: TargetType.IP,
+            targets: s3EndpointIpTargets,
+            vpc,
+        });
+
+        // listeners
+        const https = alb.addListener('https', {
+            port: 443,
+            protocol: ApplicationProtocol.HTTPS,
+            certificates: [certificate],
+            sslPolicy:SslPolicy.TLS12_EXT
+        });
+
+
+        // add routing actions. Send a 404 response if the request does not match one of our API paths
+        https.addAction('default', {
+            action: ListenerAction.fixedResponse(404, {
+                contentType: 'text/plain',
+                messageBody: 'Nothing to see here',
+            }),
+        });
+        https.addAction('apis', {
+            action: ListenerAction.forward([apiTargetGroup]),
+            conditions: [
+                ListenerCondition.pathPatterns([`/${presignPath}/*`]),
+            ],
+            priority: 1,
+        });
+        https.addAction('s3', {
+            action: ListenerAction.forward([s3EndpointTargetGroup]),
+            conditions: [
+                ListenerCondition.pathPatterns([`/${objectsPath}/*`]),
+            ],
+            priority: 2,
+        });
+    }
 }
