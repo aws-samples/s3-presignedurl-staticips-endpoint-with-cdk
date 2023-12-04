@@ -7,11 +7,8 @@ const app = new cdk.App();
 
 
 // use account details from default AWS CLI credentials:
-// const account = process.env.CDK_DEFAULT_ACCOUNT;
-// const region = process.env.CDK_DEFAULT_REGION;
-
-const account = '026543866495';
-const region = 'ap-northeast-2';
+const account = process.env.CDK_DEFAULT_ACCOUNT;
+const region = process.env.CDK_DEFAULT_REGION;
 
 if (!options.domainNamePrefix || !options.presignPath || !options.objectsPath || options.presignPath === options.objectsPath) { throw new Error('We need the ALB hostname and the api paths. API paths must be unique'); }
 
