@@ -100,9 +100,9 @@ export class UnifiedS3EndpointVpcStack extends Stack {
         this.apiVpcEndpoint = apiVpcEndpoint;
         this.s3VpcEndpoint = s3VpcEndpoint;
 
-        function getNetworkInterfaceProps(scope: Construct, idSufix: string, vpcEndpointId: string): AwsCustomResource {
+        function getNetworkInterfaceProps(scope: Construct, idSuffix: string, vpcEndpointId: string): AwsCustomResource {
             // use CDK custom resources to get the Network Interfaces and IP addresses of the VPC Endpoint
-            const vpcEndpointProps = new AwsCustomResource(scope, `vpcEndpointProps-${idSufix}`, {
+            const vpcEndpointProps = new AwsCustomResource(scope, `vpcEndpointProps-${idSuffix}`, {
                 onUpdate: {
                     service: 'EC2',
                     action: 'describeVpcEndpoints',
@@ -114,7 +114,7 @@ export class UnifiedS3EndpointVpcStack extends Stack {
                 policy: AwsCustomResourcePolicy.fromSdkCalls({resources: AwsCustomResourcePolicy.ANY_RESOURCE}),
                 logRetention: 7,
             });
-            return new AwsCustomResource(scope, `networkInterfaceProps-${idSufix}`, {
+            return new AwsCustomResource(scope, `networkInterfaceProps-${idSuffix}`, {
                 onUpdate: {
                     service: 'EC2',
                     action: 'describeNetworkInterfaces',
