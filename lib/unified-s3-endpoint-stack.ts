@@ -205,22 +205,13 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             allowAllOutbound: false
         });
 
-        albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal ALB access');
-        albSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal ALB access');
         albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow 80 egress')
         albSg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow 443 egress')
-
-        const sgImmutable = SecurityGroup.fromSecurityGroupId(
-            this,
-            "LoadBalancerSecurityGroupImmutable",
-            albSg.securityGroupId,
-            { mutable: false }
-        );
 
         const alb = new ApplicationLoadBalancer(this, 'LB', {
             vpc,
             internetFacing: false,
-            securityGroup: sgImmutable,
+            securityGroup: albSg,
             dropInvalidHeaderFields: true
         });
 
@@ -370,7 +361,7 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
                 protocol: Protocol.HTTP,
                 path: '/',
                 interval: Duration.minutes(5),
-                healthyHttpCodes: '307,403,405',
+                healthyHttpCodes: '200,307,405',
             },
             targetType: TargetType.IP,
             targets: s3EndpointIpTargets,
