@@ -77,7 +77,8 @@ export class UnifiedS3EndpointVpcStack extends Stack {
             subnetConfiguration: [
                 {
                     name: 'public-subnet',
-                    subnetType: SubnetType.PUBLIC
+                    subnetType: SubnetType.PUBLIC,
+                    mapPublicIpOnLaunch: false
                 },
                 {
                     name: 'private-isolated-subnet',
