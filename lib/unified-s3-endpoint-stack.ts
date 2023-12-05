@@ -1,6 +1,9 @@
 import {Duration, Stack, StackProps} from 'aws-cdk-lib';
 import {Construct} from 'constructs';
 import {
+    FlowLog,
+    FlowLogDestination,
+    FlowLogResourceType,
     InterfaceVpcEndpoint,
     InterfaceVpcEndpointService,
     IpAddresses,
@@ -21,7 +24,15 @@ import {
     SslPolicy,
     TargetType
 } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import {BasePathMapping, DomainName, EndpointType, LambdaRestApi, SecurityPolicy} from 'aws-cdk-lib/aws-apigateway';
+import {
+    AccessLogFormat,
+    BasePathMapping,
+    DomainName,
+    EndpointType,
+    LambdaRestApi,
+    LogGroupLogDestination,
+    SecurityPolicy
+} from 'aws-cdk-lib/aws-apigateway';
 import {AwsCustomResource, AwsCustomResourcePolicy} from 'aws-cdk-lib/custom-resources';
 import {IpTarget} from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
 import {Certificate} from "aws-cdk-lib/aws-certificatemanager";
@@ -31,9 +42,19 @@ import {Accelerator} from "aws-cdk-lib/aws-globalaccelerator";
 import {ApplicationLoadBalancerEndpoint} from "aws-cdk-lib/aws-globalaccelerator-endpoints";
 import {Runtime} from "aws-cdk-lib/aws-lambda";
 import {NodejsFunction} from "aws-cdk-lib/aws-lambda-nodejs";
-import {AnyPrincipal, Effect, PolicyDocument, PolicyStatement} from "aws-cdk-lib/aws-iam";
+import {
+    AccountRootPrincipal,
+    AnyPrincipal,
+    Effect,
+    PolicyDocument,
+    PolicyStatement,
+    Role,
+    ServicePrincipal
+} from "aws-cdk-lib/aws-iam";
 import {Bucket, BucketEncryption} from "aws-cdk-lib/aws-s3";
 import {options} from '../config';
+import {LogGroup} from "aws-cdk-lib/aws-logs";
+import {Key} from "aws-cdk-lib/aws-kms";
 import path = require('path');
 
 export class UnifiedS3EndpointVpcStack extends Stack {
@@ -46,6 +67,8 @@ export class UnifiedS3EndpointVpcStack extends Stack {
     apiVpcEndpointIpAddresses: string[];
 
     s3VpcEndpointIpAddresses: string[];
+
+    kmsKey: Key;
 
     constructor(scope: Construct, id: string, props?: StackProps) {
         super(scope, id, props);
@@ -61,6 +84,49 @@ export class UnifiedS3EndpointVpcStack extends Stack {
                     subnetType: SubnetType.PRIVATE_ISOLATED
                 }
             ]
+        });
+
+        const role = new Role(this, 'UnifiedS3EndpointVPCFlowLogRole', {
+            assumedBy: new ServicePrincipal('vpc-flow-logs.amazonaws.com')
+        });
+
+        const kmsPolicy = new PolicyDocument({
+            statements: [new PolicyStatement({
+                actions: [
+                    "kms:Encrypt*",
+                    "kms:Decrypt*",
+                    "kms:ReEncrypt*",
+                    "kms:GenerateDataKey*",
+                    "kms:Describe*"
+                ],
+                principals: [new ServicePrincipal(`logs.${this.region}.amazonaws.com`) ],
+                resources: ['*'],
+                effect: Effect.ALLOW
+            }),
+                new PolicyStatement({
+                    actions: [
+                        'kms:*'
+                    ],
+                    principals: [new AccountRootPrincipal()],
+                    resources: ['*'],
+                    effect: Effect.ALLOW
+                })
+            ],
+        });
+        const kmsKey = new Key(this, 'UnifiedS3EndpointVPCFlowLogKey', {enableKeyRotation:true,
+                policy: kmsPolicy
+            },
+
+        )
+        this.kmsKey = kmsKey;
+
+        const logGroup = new LogGroup(this, 'UnifiedS3EndpointVPCFlowLogGroup',
+            {encryptionKey: kmsKey}
+        );
+
+        new FlowLog(this, 'FlowLog', {
+            resourceType: FlowLogResourceType.fromVpc(vpc),
+            destination: FlowLogDestination.toCloudWatchLogs(logGroup, role)
         });
 
         // security group
@@ -155,6 +221,7 @@ interface ApplicationStackProps extends StackProps {
     apiVpcEndpointIpAddresses: string[],
     s3VpcEndpoint: VpcEndpoint,
     s3VpcEndpointIpAddresses: string[],
+    kmsKey: Key
 }
 
 
@@ -174,7 +241,7 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
         super(scope, id, props);
 
         const {
-            vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpoint, s3VpcEndpointIpAddresses
+            vpc, apiVpcEndpoint, apiVpcEndpointIpAddresses, s3VpcEndpoint, s3VpcEndpointIpAddresses, kmsKey
         } = props;
 
         const {
@@ -257,7 +324,9 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
 
         const bucket = new Bucket(this, "united.s3.bucket",
             {bucketName: unifiedS3EndpointDomainName,
-                encryption: BucketEncryption.S3_MANAGED
+                encryption: BucketEncryption.S3_MANAGED,
+                serverAccessLogsBucket: logBucket,
+                serverAccessLogsPrefix: 's3AccessLogs'
             }
         );
 
@@ -272,7 +341,7 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             }
         });
 
-        bucket.grantReadWrite(handler);
+        bucket.grantRead(handler);
 
         bucket.addToResourcePolicy(
             new PolicyStatement(
@@ -295,9 +364,22 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
             )
         );
 
+
+
+
+        const logGroup = new LogGroup(this, "UnifiedS3EndpointApiGatewayAccessLogs",
+            {encryptionKey: kmsKey}
+            );
+
         const api = new LambdaRestApi(this, 'PrivateLambdaRestApi', {
             endpointTypes: [EndpointType.PRIVATE],
             handler: handler,
+            deploy: true,
+            deployOptions: {
+                accessLogDestination: new LogGroupLogDestination(logGroup),
+                accessLogFormat: AccessLogFormat.clf(),
+            },
+            cloudWatchRole: true,
             policy: new PolicyDocument({
                 statements: [
                     new PolicyStatement({
@@ -320,6 +402,14 @@ export class UnifiedS3EndpointApplicationStack extends Stack {
                 ]
             })
         })
+
+        api.addUsagePlan('UsagePlan', {
+            apiStages: [{stage:api.deploymentStage}],
+            throttle: {
+                rateLimit: 10,
+                burstLimit: 2
+            }
+        });
 
         // Create the API domain
         const apiDomain = new DomainName(this, 'unifiedS3EndpointDomain', {
