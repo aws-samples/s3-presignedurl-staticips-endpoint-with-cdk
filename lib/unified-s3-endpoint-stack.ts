@@ -140,7 +140,6 @@ export class UnifiedS3EndpointVpcStack extends Stack {
         vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(443), 'allow internal access');
         vpceSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(80), 'allow internal access');
         vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(443), 'allow access to service');
-        vpceSg.addEgressRule(Peer.anyIpv4(), Port.tcp(80), 'allow access to service');
 
 
 
