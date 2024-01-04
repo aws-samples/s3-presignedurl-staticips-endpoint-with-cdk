@@ -134,11 +134,11 @@ https://aws.amazon.com/blogs/networking-and-content-delivery/hosting-internal-ht
 https://aws.amazon.com/blogs/developer/generate-presigned-url-modular-aws-sdk-javascript/
 
 
-## Security
+# Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
-## License
+# License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
 
