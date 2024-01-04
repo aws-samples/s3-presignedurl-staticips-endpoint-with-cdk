@@ -86,7 +86,7 @@ export const options = {
 ```
 
 ### Deploy the stacks
-
+With the following command, you can deploy two stacks: one for the VPC and another for the application.
 ```shell
 $ npm install
 $ cdk synth
@@ -116,11 +116,25 @@ The response will return with a 301 redirect status code containing the presigne
 
 
 # Clean Up
-### Clean Up CDK Deployment
-`$ cdk destroy`
+### Destroy the stacks 
+Execute the following command to destroy both the VPC and application stacks.
+`$ cdk destroy --all`
 
 ### Delete S3 Buckets
-Empty and delete the S3 Buckets(object bucket, log bucket) which created by the stack.
+Empty and delete the object S3 bucket and logs S3 bucket that are not deleted by default.
+
+Bucket name is ${s3-bucket-prefix}.${domain} and ${s3-bucket-prefix}.${domain}-logs.
+
+If you prefer to use the AWS CLI for deleting the buckets, you can execute the command like below.
+
+Replace `${s3-bucket-prefix}` and `${domain}` with the values you set in previous steps.
+```
+$ aws s3 rm s3://${s3-bucket-prefix}.${domain} --recursive
+$ aws s3 rb s3://${s3-bucket-prefix}.${domain} --force
+$ aws s3 rm s3://${s3-bucket-prefix}.${domain}-logs --recursive
+$ aws s3 rb s3://${s3-bucket-prefix}.${domain}-logs --force
+```
+
 
 
 # References
